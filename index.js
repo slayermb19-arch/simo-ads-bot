@@ -101,7 +101,12 @@ async function downloadProductPhoto(fileId) {
   if (!file.file_path) throw new Error("Telegram did not return a photo path");
   const response = await fetch(`${TELEGRAM_FILE_API}/${file.file_path}`);
   if (!response.ok) throw new Error("Could not download the Telegram photo");
-  return { buffer: Buffer.from(await response.arrayBuffer()), mime: response.headers.get("content-type") || "image/jpeg" };
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const headerMime = (response.headers.get("content-type") || "").split(";")[0].trim();
+  const extension = (file.file_path.split(".").pop() || "jpg").toLowerCase();
+  const extensionMime = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif" }[extension] || "image/jpeg";
+  const mime = headerMime.startsWith("image/") ? headerMime : extensionMime;
+  return { buffer, mime };
 }
 
 function parseJsonText(text) {
