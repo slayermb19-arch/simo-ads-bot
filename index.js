@@ -7,6 +7,11 @@ const aiEnabled = process.env.AI_ENABLED === "true";
 const aiBaseUrl = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
 const aiTextModel = process.env.AI_TEXT_MODEL || "gpt-4.1-mini";
 const aiImageModel = process.env.AI_IMAGE_MODEL || "gpt-image-1";
+const notionToken = process.env.NOTION_TOKEN;
+const notionDatabaseId = process.env.NOTION_DATABASE_ID;
+const notionDataSourceId = process.env.NOTION_DATA_SOURCE_ID;
+const notionVersion = process.env.NOTION_VERSION || "2025-09-03";
+const notionEnabled = Boolean(notionToken && (notionDatabaseId || notionDataSourceId));
 
 if (!telegramToken) {
   console.error("Missing TELEGRAM_BOT_TOKEN. Add it in Railway Variables.");
@@ -56,6 +61,24 @@ async function aiJson(endpoint, body) {
   });
   const data = await response.json();
   if (!response.ok) throw new Error(`AI ${endpoint}: ${data?.error?.message || "API request failed"}`);
+  return data;
+}
+
+async function notionJson(body) {
+  const parent = notionDataSourceId
+    ? { type: "data_source_id", data_source_id: notionDataSourceId }
+    : { type: "database_id", database_id: notionDatabaseId };
+  const response = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${notionToken}`,
+      "Notion-Version": notionVersion,
+    },
+    body: JSON.stringify({ parent, properties: body }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(`Notion: ${data?.message || "API request failed"}`);
   return data;
 }
 
@@ -131,6 +154,17 @@ async function sendPhoto(chatId, buffer, caption) {
   await telegramMultipart("sendPhoto", form);
 }
 
+async function createNotionProduct(price, title = "Telegram product", description = "") {
+  const numericPrice = Number(String(price).replace(/[^0-9.,-]/g, "").replace(",", "."));
+  const properties = {
+    Name: { title: [{ text: { content: title } }] },
+    Status: { status: { name: "Draft" } },
+  };
+  if (Number.isFinite(numericPrice)) properties.Price = { number: numericPrice };
+  if (description) properties.Description = { rich_text: [{ text: { content: description } }] };
+  return notionJson(properties);
+}
+
 async function processProduct(chatId, draft) {
   const photo = await downloadProductPhoto(draft.fileId);
   await send(chatId, "كنوجد العنوان والوصف بـ AI... ⏳");
@@ -153,7 +187,7 @@ async function handleMessage(message) {
   if (!chatId) return;
 
   if (message.text === "/start" || message.text === "/help") {
-    await send(chatId, "مرحبا 👋\n\n/newproduct - بدا منتج جديد\n/testopenai - اختبار AI\n/cancel - إلغاء العملية الحالية");
+    await send(chatId, "مرحبا 👋\n\n/newproduct - بدا منتج جديد\n/testnotion - اختبار Notion\n/testopenai - اختبار AI\n/cancel - إلغاء العملية الحالية");
     return;
   }
 
@@ -164,6 +198,21 @@ async function handleMessage(message) {
     }
     const response = await aiJson("responses", { model: aiTextModel, input: "Reply with exactly: AI_OK" });
     await send(chatId, `AI خدام ✅\n${extractResponseText(response)}`);
+    return;
+  }
+
+  if (message.text === "/testnotion") {
+    if (!notionEnabled) {
+      await send(chatId, "Notion مازال ما تفعلاش: خاص NOTION_TOKEN و NOTION_DATABASE_ID.");
+      return;
+    }
+    try {
+      const page = await createNotionProduct("0", "Test product", "Test row from Telegram");
+      await send(chatId, `Notion خدام ✅\n${page.url || "Row created"}`);
+    } catch (error) {
+      console.error(error);
+      await send(chatId, `وقع مشكل فـ Notion: ${error.message}`);
+    }
     return;
   }
 
@@ -191,8 +240,20 @@ async function handleMessage(message) {
   if (message.text && draft.stage === "price") {
     draft.price = message.text.trim();
     if (!aiEnabled) {
-      drafts.delete(chatId);
-      await send(chatId, `تم تسجيل المنتج ✅\n\nالثمن: ${draft.price}\n\nChatGPT مخليّاه معطل حالياً، وغادي نزيدوه من بعد بلا ما نعاودو نبدلو إعدادات Telegram.`);
+      if (notionEnabled) {
+        try {
+          const page = await createNotionProduct(draft.price);
+          drafts.delete(chatId);
+          await send(chatId, `تم تسجيل المنتج فـ Notion ✅\n\nالثمن: ${draft.price}\n\n${page.url || "Row created"}`);
+        } catch (error) {
+          console.error(error);
+          drafts.delete(chatId);
+          await send(chatId, `Telegram خدام ولكن وقع مشكل فـ Notion: ${error.message}`);
+        }
+      } else {
+        drafts.delete(chatId);
+        await send(chatId, `تم تسجيل المنتج ✅\n\nالثمن: ${draft.price}\n\nChatGPT مخليّاه معطل حالياً، وNotion مازال ما تفعلاش.`);
+      }
       return;
     }
     draft.stage = "processing";
