@@ -13,14 +13,12 @@ if (!telegramToken) {
   console.error("Missing TELEGRAM_BOT_TOKEN. Add it in Railway Variables.");
   process.exit(1);
 }
-
 if (aiEnabled && !openaiKey) {
   console.error("AI_ENABLED=true but OPENAI_API_KEY is missing. ChatGPT is used for images.");
   process.exit(1);
 }
-
 if (aiEnabled && !geminiKey) {
-  console.error("AI_ENABLED=true but GEMINI_API_KEY is missing. Gemini is used for title, description and SEO.");
+  console.error("AI_ENABLED=true but GEMINI_API_KEY is missing. Gemini is used for text and SEO.");
   process.exit(1);
 }
 
@@ -29,11 +27,16 @@ const TELEGRAM_FILE_API = ["https:", "", "api.telegram.org", "file", "bot" + tel
 const drafts = new Map();
 let offset = 0;
 
+// EDIT THESE PROMPTS HERE. They are not Railway variables; they stay in the bot code.
+const COPY_PROMPT = `Create honest e-commerce copy for this product photo. Use only visible or user-provided information. Do not invent ingredients, certifications, medical claims or unsupported benefits. Write in clear French for Moroccan customers. Return only valid JSON with exactly these keys: title, description, seo_title, meta_description, keywords, slug. SEO title should be 60 characters or less when possible. Meta description should be approximately 150-160 characters. Keywords must be an array of 8-12 natural search phrases. Slug must use lowercase Latin words separated by hyphens.`;
+
+const IMAGE_BASE_PROMPT = `Create a professional vertical 9:16 product advertisement from the attached product photo. Preserve the exact product packaging, label, logo, shape, colors, cap or pump, visible product text and proportions. Use the same locked background, surface, environment, color atmosphere and lighting direction in all four ads. No writing added to the image, no price, no CTA, no hashtags, no watermark, no extra product, no people, no fake text, no distorted packaging, no cropped product and no invented claims. The result must be commercially clean and mobile-first.`;
+
 const imageVariants = [
-  "Use the same locked background and set. Vary only the camera angle and product placement: premium studio hero composition.",
-  "Use the same locked background and set. Vary only the camera distance and crop: elegant lifestyle composition.",
-  "Use the same locked background and set. Vary only the product position and perspective: clean e-commerce composition.",
-  "Use the same locked background and set. Vary only the framing and depth: cinematic social-ad composition.",
+  "Ad 1: premium hero shot, product centered with elegant breathing room, slightly low camera angle.",
+  "Ad 2: lifestyle framing, same background, product placed slightly to one side with a different crop and depth.",
+  "Ad 3: clean e-commerce framing, same background, closer product view with sharp label visibility and balanced negative space.",
+  "Ad 4: cinematic social-ad framing, same background, different perspective and product placement while preserving the campaign identity.",
 ];
 
 async function telegram(method, body = {}) {
@@ -56,17 +59,15 @@ async function telegramMultipart(method, form) {
 
 async function geminiText(photo, price, prompt) {
   const url = ["https:", "", "generativelanguage.googleapis.com", "v1beta", "models", geminiTextModel].join("/") + ":generateContent";
+  const parts = [{ text: `${prompt}\nPrice: ${price}` }];
+  if (photo?.buffer?.length) {
+    parts.push({ inline_data: { mime_type: photo.mime, data: photo.buffer.toString("base64") } });
+  }
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": geminiKey },
     body: JSON.stringify({
-      contents: [{
-        role: "user",
-        parts: [
-          { text: `${prompt}\nPrice: ${price}` },
-          { inline_data: { mime_type: photo.mime, data: photo.buffer.toString("base64") } },
-        ],
-      }],
+      contents: [{ role: "user", parts }],
       generationConfig: { responseMimeType: "application/json" },
     }),
   });
@@ -78,7 +79,7 @@ async function geminiText(photo, price, prompt) {
 async function openaiImage(photo, variant) {
   const form = new FormData();
   form.append("model", openaiImageModel);
-  form.append("prompt", `Create one vertical 9:16 photorealistic product advertisement from the attached product image. Preserve the exact product shape, packaging, logo, colors, label and proportions. Keep the background identical to the approved reference style across all four images. ${variant} No writing, no price, no CTA, no watermark, no extra products, no people, no fake text and no invented claims. The product must be sharp, recognizable and commercially accurate.`);
+  form.append("prompt", `${IMAGE_BASE_PROMPT}\n${variant}`);
   form.append("size", "1024x1536");
   form.append("quality", "medium");
   form.append("image", new Blob([photo.buffer], { type: photo.mime }), "product.jpg");
@@ -113,8 +114,7 @@ function parseJsonText(text) {
 }
 
 async function createProductCopy(photo, price) {
-  const prompt = `Create an honest e-commerce title, description and SEO fields for this product photo. Use only visible or provided information. Do not invent ingredients, certifications, medical claims or unsupported benefits. Write in clear French for Moroccan customers. Return only valid JSON with exactly these keys: title, description, seo_title, meta_description, keywords, slug. SEO title max 60 characters when possible. Meta description approximately 150-160 characters. Keywords should be an array of 8-12 natural phrases. Slug must be lowercase Latin words separated by hyphens.`;
-    const text = await geminiText(testPhoto, "0", "Reply with exactly the word GEMINI_OK. Do not use an image.");
+  const text = await geminiText(photo, price, COPY_PROMPT);
   return parseJsonText(text);
 }
 
@@ -135,7 +135,6 @@ async function processProduct(chatId, draft) {
   await send(chatId, "Gemini كيوجد Title وDescription وSEO... ⏳");
   const copy = await createProductCopy(photo, draft.price);
   await send(chatId, `Title: ${copy.title}\n\nDescription: ${copy.description}\n\nSEO Title: ${copy.seo_title || ""}\nMeta Description: ${copy.meta_description || ""}\nKeywords: ${Array.isArray(copy.keywords) ? copy.keywords.join(", ") : copy.keywords || ""}\nSlug: ${copy.slug || ""}\n\nChatGPT كيوجد 4 صور بلا كتابة وبنفس الخلفية... ⏳`);
-
   for (let i = 0; i < imageVariants.length; i += 1) {
     const image = await openaiImage(photo, imageVariants[i]);
     await sendPhoto(chatId, image, `Ad ${i + 1}/4`);
@@ -153,7 +152,7 @@ async function handleMessage(message) {
   if (!chatId) return;
 
   if (message.text === "/start" || message.text === "/help") {
-    await send(chatId, "مرحبا 👋\n\n/newproduct - بدا منتج جديد\n/testai - اختبار Gemini وChatGPT\n/cancel - إلغاء العملية الحالية");
+    await send(chatId, "مرحبا 👋\n\n/newproduct - بدا منتج جديد\n/testai - اختبار Gemini\n/cancel - إلغاء العملية الحالية");
     return;
   }
 
@@ -162,8 +161,7 @@ async function handleMessage(message) {
       await send(chatId, "AI مخليّاه معطل مؤقتاً ✅");
       return;
     }
-    const testPhoto = { mime: "image/jpeg", buffer: Buffer.from("") };
-    const text = await geminiText(testPhoto, "0", "Reply with exactly the word GEMINI_OK. Do not use an image.");
+    const text = await geminiText(null, "0", "Reply with exactly the word GEMINI_OK. Do not use an image.");
     await send(chatId, `Gemini خدام ✅\n${text}`);
     return;
   }
