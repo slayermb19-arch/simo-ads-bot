@@ -105,7 +105,9 @@ async function downloadProductPhoto(fileId) {
   const headerMime = (response.headers.get("content-type") || "").split(";")[0].trim();
   const extension = (file.file_path.split(".").pop() || "jpg").toLowerCase();
   const extensionMime = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif" }[extension] || "image/jpeg";
-  const mime = headerMime.startsWith("image/") ? headerMime : extensionMime;
+  // Telegram may report application/octet-stream; Telegram photo uploads are JPEGs.
+  // Always send a valid image MIME type to Gemini and OpenAI.
+  const mime = "image/jpeg";
   return { buffer, mime };
 }
 
