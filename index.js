@@ -3,15 +3,11 @@ import process from "node:process";
 
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 const openaiKey = process.env.OPENAI_API_KEY;
+const geminiKey = process.env.GEMINI_API_KEY;
 const aiEnabled = process.env.AI_ENABLED === "true";
-const aiBaseUrl = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
-const aiTextModel = process.env.AI_TEXT_MODEL || "gpt-4.1-mini";
-const aiImageModel = process.env.AI_IMAGE_MODEL || "gpt-image-1";
-const notionToken = process.env.NOTION_TOKEN;
-const notionDatabaseId = process.env.NOTION_DATABASE_ID;
-const notionDataSourceId = process.env.NOTION_DATA_SOURCE_ID;
-const notionVersion = process.env.NOTION_VERSION || "2025-09-03";
-const notionEnabled = Boolean(notionToken && (notionDatabaseId || notionDataSourceId));
+const openaiBaseUrl = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+const openaiImageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
+const geminiTextModel = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash";
 
 if (!telegramToken) {
   console.error("Missing TELEGRAM_BOT_TOKEN. Add it in Railway Variables.");
@@ -19,7 +15,12 @@ if (!telegramToken) {
 }
 
 if (aiEnabled && !openaiKey) {
-  console.error("AI_ENABLED=true but OPENAI_API_KEY is missing. Add it or set AI_ENABLED=false.");
+  console.error("AI_ENABLED=true but OPENAI_API_KEY is missing. ChatGPT is used for images.");
+  process.exit(1);
+}
+
+if (aiEnabled && !geminiKey) {
+  console.error("AI_ENABLED=true but GEMINI_API_KEY is missing. Gemini is used for title, description and SEO.");
   process.exit(1);
 }
 
@@ -29,10 +30,10 @@ const drafts = new Map();
 let offset = 0;
 
 const imageVariants = [
-  "Clean luxury studio product photo on a light marble surface with soft blue accents and gentle botanical details.",
-  "Premium lifestyle product advertisement with elegant bathroom-inspired styling, soft daylight and realistic reflections.",
-  "High-end editorial beauty advertisement with a refined colorful background, controlled studio lighting and cinematic depth.",
-  "Minimal premium e-commerce hero image with a clean soft background, subtle shadow and strong product focus.",
+  "Use the same locked background and set. Vary only the camera angle and product placement: premium studio hero composition.",
+  "Use the same locked background and set. Vary only the camera distance and crop: elegant lifestyle composition.",
+  "Use the same locked background and set. Vary only the product position and perspective: clean e-commerce composition.",
+  "Use the same locked background and set. Vary only the framing and depth: cinematic social-ad composition.",
 ];
 
 async function telegram(method, body = {}) {
@@ -53,33 +54,45 @@ async function telegramMultipart(method, form) {
   return data.result;
 }
 
-async function aiJson(endpoint, body) {
-  const response = await fetch(`${aiBaseUrl}/${endpoint}`, {
+async function geminiText(photo, price, prompt) {
+  const url = ["https:", "", "generativelanguage.googleapis.com", "v1beta", "models", geminiTextModel].join("/") + ":generateContent";
+  const response = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${openaiKey}` },
-    body: JSON.stringify(body),
+    headers: { "content-type": "application/json", "x-goog-api-key": geminiKey },
+    body: JSON.stringify({
+      contents: [{
+        role: "user",
+        parts: [
+          { text: `${prompt}\nPrice: ${price}` },
+          { inline_data: { mime_type: photo.mime, data: photo.buffer.toString("base64") } },
+        ],
+      }],
+      generationConfig: { responseMimeType: "application/json" },
+    }),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(`AI ${endpoint}: ${data?.error?.message || "API request failed"}`);
-  return data;
+  if (!response.ok) throw new Error(`Gemini: ${data?.error?.message || "API request failed"}`);
+  return data?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("").trim() || "";
 }
 
-async function notionJson(body) {
-  const parent = notionDataSourceId
-    ? { type: "data_source_id", data_source_id: notionDataSourceId }
-    : { type: "database_id", database_id: notionDatabaseId };
-  const response = await fetch("https://api.notion.com/v1/pages", {
+async function openaiImage(photo, variant) {
+  const form = new FormData();
+  form.append("model", openaiImageModel);
+  form.append("prompt", `Create one vertical 9:16 photorealistic product advertisement from the attached product image. Preserve the exact product shape, packaging, logo, colors, label and proportions. Keep the background identical to the approved reference style across all four images. ${variant} No writing, no price, no CTA, no watermark, no extra products, no people, no fake text and no invented claims. The product must be sharp, recognizable and commercially accurate.`);
+  form.append("size", "1024x1536");
+  form.append("quality", "medium");
+  form.append("image", new Blob([photo.buffer], { type: photo.mime }), "product.jpg");
+
+  const response = await fetch(`${openaiBaseUrl}/images/edits`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${notionToken}`,
-      "Notion-Version": notionVersion,
-    },
-    body: JSON.stringify({ parent, properties: body }),
+    headers: { authorization: `Bearer ${openaiKey}` },
+    body: form,
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(`Notion: ${data?.message || "API request failed"}`);
-  return data;
+  if (!response.ok) throw new Error(`ChatGPT image: ${data?.error?.message || "API request failed"}`);
+  const item = data.data?.[0];
+  if (!item?.b64_json) throw new Error("ChatGPT returned no image data");
+  return Buffer.from(item.b64_json, "base64");
 }
 
 async function downloadProductPhoto(fileId) {
@@ -90,56 +103,19 @@ async function downloadProductPhoto(fileId) {
   return { buffer: Buffer.from(await response.arrayBuffer()), mime: response.headers.get("content-type") || "image/jpeg" };
 }
 
-function extractResponseText(response) {
-  if (typeof response.output_text === "string") return response.output_text;
-  const parts = [];
-  for (const item of response.output || []) {
-    for (const content of item.content || []) {
-      if (typeof content.text === "string") parts.push(content.text);
-    }
-  }
-  return parts.join("\n").trim();
-}
-
 function parseJsonText(text) {
   const cleaned = text.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
   try {
     return JSON.parse(cleaned);
   } catch {
-    return { title: "Product", description: cleaned };
+    return { title: "Product", description: cleaned, seo_title: "", meta_description: "", keywords: [], slug: "" };
   }
 }
 
 async function createProductCopy(photo, price) {
-  const imageDataUrl = `data:${photo.mime};base64,${photo.buffer.toString("base64")}`;
-  const response = await aiJson("responses", {
-    model: aiTextModel,
-    input: [{ role: "user", content: [
-      { type: "input_text", text: `Analyze this product photo and write a concise e-commerce title and description. Price: ${price}. Do not invent medical claims, ingredients, certifications or unsupported facts. Return only valid JSON with keys title and description.` },
-      { type: "input_image", image_url: imageDataUrl },
-    ] }],
-  });
-  return parseJsonText(extractResponseText(response));
-}
-
-async function createAdImage(photo, variant) {
-  const form = new FormData();
-  form.append("model", aiImageModel);
-  form.append("prompt", `Create a photorealistic premium commercial advertisement using the attached product photo as the strict product reference. Preserve the exact product shape, packaging, logo, colors, label and proportions. Do not redesign or invent the packaging. ${variant} Keep the product sharp and recognizable. Do not add people, hands, extra products, fake logos, medical claims, price, watermark or invented text. High-end e-commerce advertising, vertical composition, realistic lighting and natural shadows.`);
-  form.append("size", "1024x1536");
-  form.append("quality", "medium");
-  form.append("image", new Blob([photo.buffer], { type: photo.mime }), "product.jpg");
-
-  const response = await fetch(`${aiBaseUrl}/images/edits`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${openaiKey}` },
-    body: form,
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(`AI image edit: ${data?.error?.message || "API request failed"}`);
-  const item = data.data?.[0];
-  if (!item?.b64_json) throw new Error("AI returned no image data");
-  return Buffer.from(item.b64_json, "base64");
+  const prompt = `Create an honest e-commerce title, description and SEO fields for this product photo. Use only visible or provided information. Do not invent ingredients, certifications, medical claims or unsupported benefits. Write in clear French for Moroccan customers. Return only valid JSON with exactly these keys: title, description, seo_title, meta_description, keywords, slug. SEO title max 60 characters when possible. Meta description approximately 150-160 characters. Keywords should be an array of 8-12 natural phrases. Slug must be lowercase Latin words separated by hyphens.`;
+    const text = await geminiText(testPhoto, "0", "Reply with exactly the word GEMINI_OK. Do not use an image.");
+  return parseJsonText(text);
 }
 
 async function send(chatId, text) {
@@ -154,27 +130,17 @@ async function sendPhoto(chatId, buffer, caption) {
   await telegramMultipart("sendPhoto", form);
 }
 
-async function createNotionProduct(price, title = "Telegram product", description = "") {
-  const numericPrice = Number(String(price).replace(/[^0-9.,-]/g, "").replace(",", "."));
-  const properties = {
-    Name: { title: [{ text: { content: title } }] },
-    Status: { status: { name: "Draft" } },
-  };
-  if (Number.isFinite(numericPrice)) properties.Price = { number: numericPrice };
-  if (description) properties.Description = { rich_text: [{ text: { content: description } }] };
-  return notionJson(properties);
-}
-
 async function processProduct(chatId, draft) {
   const photo = await downloadProductPhoto(draft.fileId);
-  await send(chatId, "كنوجد العنوان والوصف بـ AI... ⏳");
+  await send(chatId, "Gemini كيوجد Title وDescription وSEO... ⏳");
   const copy = await createProductCopy(photo, draft.price);
-  await send(chatId, `العنوان المقترح:\n${copy.title}\n\nالوصف:\n${copy.description}\n\nدابا كنوجد 4 صور إعلانية... ⏳`);
+  await send(chatId, `Title: ${copy.title}\n\nDescription: ${copy.description}\n\nSEO Title: ${copy.seo_title || ""}\nMeta Description: ${copy.meta_description || ""}\nKeywords: ${Array.isArray(copy.keywords) ? copy.keywords.join(", ") : copy.keywords || ""}\nSlug: ${copy.slug || ""}\n\nChatGPT كيوجد 4 صور بلا كتابة وبنفس الخلفية... ⏳`);
+
   for (let i = 0; i < imageVariants.length; i += 1) {
-    const image = await createAdImage(photo, imageVariants[i]);
+    const image = await openaiImage(photo, imageVariants[i]);
     await sendPhoto(chatId, image, `Ad ${i + 1}/4`);
   }
-  await send(chatId, "كملنا 4 الصور ✅\nالمرحلة الجاية هي APPROVE ثم النشر.");
+  await send(chatId, "كملنا Gemini للنصوص وChatGPT للصور ✅");
 }
 
 function draftFor(chatId) {
@@ -187,32 +153,18 @@ async function handleMessage(message) {
   if (!chatId) return;
 
   if (message.text === "/start" || message.text === "/help") {
-    await send(chatId, "مرحبا 👋\n\n/newproduct - بدا منتج جديد\n/testnotion - اختبار Notion\n/testopenai - اختبار AI\n/cancel - إلغاء العملية الحالية");
+    await send(chatId, "مرحبا 👋\n\n/newproduct - بدا منتج جديد\n/testai - اختبار Gemini وChatGPT\n/cancel - إلغاء العملية الحالية");
     return;
   }
 
-  if (message.text === "/testopenai") {
+  if (message.text === "/testai") {
     if (!aiEnabled) {
-      await send(chatId, "AI مخليّاه معطل مؤقتاً ✅\nمنين نكونو واجدين نبدلو AI_ENABLED إلى true.");
+      await send(chatId, "AI مخليّاه معطل مؤقتاً ✅");
       return;
     }
-    const response = await aiJson("responses", { model: aiTextModel, input: "Reply with exactly: AI_OK" });
-    await send(chatId, `AI خدام ✅\n${extractResponseText(response)}`);
-    return;
-  }
-
-  if (message.text === "/testnotion") {
-    if (!notionEnabled) {
-      await send(chatId, "Notion مازال ما تفعلاش: خاص NOTION_TOKEN و NOTION_DATABASE_ID.");
-      return;
-    }
-    try {
-      const page = await createNotionProduct("0", "Test product", "Test row from Telegram");
-      await send(chatId, `Notion خدام ✅\n${page.url || "Row created"}`);
-    } catch (error) {
-      console.error(error);
-      await send(chatId, `وقع مشكل فـ Notion: ${error.message}`);
-    }
+    const testPhoto = { mime: "image/jpeg", buffer: Buffer.from("") };
+    const text = await geminiText(testPhoto, "0", "Reply with exactly the word GEMINI_OK. Do not use an image.");
+    await send(chatId, `Gemini خدام ✅\n${text}`);
     return;
   }
 
@@ -240,20 +192,8 @@ async function handleMessage(message) {
   if (message.text && draft.stage === "price") {
     draft.price = message.text.trim();
     if (!aiEnabled) {
-      if (notionEnabled) {
-        try {
-          const page = await createNotionProduct(draft.price);
-          drafts.delete(chatId);
-          await send(chatId, `تم تسجيل المنتج فـ Notion ✅\n\nالثمن: ${draft.price}\n\n${page.url || "Row created"}`);
-        } catch (error) {
-          console.error(error);
-          drafts.delete(chatId);
-          await send(chatId, `Telegram خدام ولكن وقع مشكل فـ Notion: ${error.message}`);
-        }
-      } else {
-        drafts.delete(chatId);
-        await send(chatId, `تم تسجيل المنتج ✅\n\nالثمن: ${draft.price}\n\nChatGPT مخليّاه معطل حالياً، وNotion مازال ما تفعلاش.`);
-      }
+      drafts.delete(chatId);
+      await send(chatId, `تم تسجيل المنتج ✅\n\nالثمن: ${draft.price}\n\nAI مخليّاه معطل حالياً. منين نفعّلوه: Gemini للنصوص وChatGPT للصور.`);
       return;
     }
     draft.stage = "processing";
