@@ -3,20 +3,23 @@ import process from "node:process";
 
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 const openaiKey = process.env.OPENAI_API_KEY;
+const aiEnabled = process.env.AI_ENABLED === "true";
+const aiBaseUrl = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+const aiTextModel = process.env.AI_TEXT_MODEL || "gpt-4.1-mini";
+const aiImageModel = process.env.AI_IMAGE_MODEL || "gpt-image-1";
 
 if (!telegramToken) {
   console.error("Missing TELEGRAM_BOT_TOKEN. Add it in Railway Variables.");
   process.exit(1);
 }
 
-if (!openaiKey) {
-  console.error("Missing OPENAI_API_KEY. Add it in Railway Variables.");
+if (aiEnabled && !openaiKey) {
+  console.error("AI_ENABLED=true but OPENAI_API_KEY is missing. Add it or set AI_ENABLED=false.");
   process.exit(1);
 }
 
 const TELEGRAM_API = ["https:", "", "api.telegram.org", "bot" + telegramToken].join("/");
 const TELEGRAM_FILE_API = ["https:", "", "api.telegram.org", "file", "bot" + telegramToken].join("/");
-const OPENAI_API = ["https:", "", "api.openai.com", "v1"].join("/");
 const drafts = new Map();
 let offset = 0;
 
@@ -39,42 +42,29 @@ async function telegram(method, body = {}) {
 }
 
 async function telegramMultipart(method, form) {
-  const response = await fetch(`${TELEGRAM_API}/${method}`, {
-    method: "POST",
-    body: form,
-  });
+  const response = await fetch(`${TELEGRAM_API}/${method}`, { method: "POST", body: form });
   const data = await response.json();
   if (!data.ok) throw new Error(`${method}: ${data.description || "Telegram API error"}`);
   return data.result;
 }
 
-async function openaiJson(endpoint, body) {
-  const response = await fetch(`${OPENAI_API}/${endpoint}`, {
+async function aiJson(endpoint, body) {
+  const response = await fetch(`${aiBaseUrl}/${endpoint}`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${openaiKey}`,
-    },
+    headers: { "content-type": "application/json", authorization: `Bearer ${openaiKey}` },
     body: JSON.stringify(body),
   });
   const data = await response.json();
-  if (!response.ok) {
-    throw new Error(`OpenAI ${endpoint}: ${data?.error?.message || "API request failed"}`);
-  }
+  if (!response.ok) throw new Error(`AI ${endpoint}: ${data?.error?.message || "API request failed"}`);
   return data;
 }
 
 async function downloadProductPhoto(fileId) {
   const file = await telegram("getFile", { file_id: fileId });
   if (!file.file_path) throw new Error("Telegram did not return a photo path");
-
   const response = await fetch(`${TELEGRAM_FILE_API}/${file.file_path}`);
   if (!response.ok) throw new Error("Could not download the Telegram photo");
-
-  return {
-    buffer: Buffer.from(await response.arrayBuffer()),
-    mime: response.headers.get("content-type") || "image/jpeg",
-  };
+  return { buffer: Buffer.from(await response.arrayBuffer()), mime: response.headers.get("content-type") || "image/jpeg" };
 }
 
 function extractResponseText(response) {
@@ -99,47 +89,33 @@ function parseJsonText(text) {
 
 async function createProductCopy(photo, price) {
   const imageDataUrl = `data:${photo.mime};base64,${photo.buffer.toString("base64")}`;
-  const response = await openaiJson("responses", {
-    model: process.env.OPENAI_TEXT_MODEL || "gpt-4.1-mini",
-    input: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: `Analyze this product photo and write a concise e-commerce title and description. Price: ${price}. Do not invent medical claims, ingredients, certifications or unsupported facts. Return only valid JSON with keys title and description.`,
-          },
-          { type: "input_image", image_url: imageDataUrl },
-        ],
-      },
-    ],
+  const response = await aiJson("responses", {
+    model: aiTextModel,
+    input: [{ role: "user", content: [
+      { type: "input_text", text: `Analyze this product photo and write a concise e-commerce title and description. Price: ${price}. Do not invent medical claims, ingredients, certifications or unsupported facts. Return only valid JSON with keys title and description.` },
+      { type: "input_image", image_url: imageDataUrl },
+    ] }],
   });
   return parseJsonText(extractResponseText(response));
 }
 
 async function createAdImage(photo, variant) {
   const form = new FormData();
-  form.append("model", process.env.OPENAI_IMAGE_MODEL || "gpt-image-1");
-  form.append(
-    "prompt",
-    `Create a photorealistic premium commercial advertisement using the attached product photo as the strict product reference. Preserve the exact product shape, packaging, logo, colors, label and proportions. Do not redesign or invent the packaging. ${variant} Keep the product sharp and recognizable. Do not add people, hands, extra products, fake logos, medical claims, price, watermark or invented text. High-end e-commerce advertising, vertical composition, realistic lighting and natural shadows.`,
-  );
+  form.append("model", aiImageModel);
+  form.append("prompt", `Create a photorealistic premium commercial advertisement using the attached product photo as the strict product reference. Preserve the exact product shape, packaging, logo, colors, label and proportions. Do not redesign or invent the packaging. ${variant} Keep the product sharp and recognizable. Do not add people, hands, extra products, fake logos, medical claims, price, watermark or invented text. High-end e-commerce advertising, vertical composition, realistic lighting and natural shadows.`);
   form.append("size", "1024x1536");
   form.append("quality", "medium");
   form.append("image", new Blob([photo.buffer], { type: photo.mime }), "product.jpg");
 
-  const response = await fetch(`${OPENAI_API}/images/edits`, {
+  const response = await fetch(`${aiBaseUrl}/images/edits`, {
     method: "POST",
     headers: { authorization: `Bearer ${openaiKey}` },
     body: form,
   });
   const data = await response.json();
-  if (!response.ok) {
-    throw new Error(`OpenAI image edit: ${data?.error?.message || "API request failed"}`);
-  }
-
+  if (!response.ok) throw new Error(`AI image edit: ${data?.error?.message || "API request failed"}`);
   const item = data.data?.[0];
-  if (!item?.b64_json) throw new Error("OpenAI returned no image data");
+  if (!item?.b64_json) throw new Error("AI returned no image data");
   return Buffer.from(item.b64_json, "base64");
 }
 
@@ -157,20 +133,14 @@ async function sendPhoto(chatId, buffer, caption) {
 
 async function processProduct(chatId, draft) {
   const photo = await downloadProductPhoto(draft.fileId);
-  await send(chatId, "كنوجد العنوان والوصف بـ ChatGPT... ⏳");
+  await send(chatId, "كنوجد العنوان والوصف بـ AI... ⏳");
   const copy = await createProductCopy(photo, draft.price);
-
-  await send(
-    chatId,
-    `العنوان المقترح:\n${copy.title}\n\nالوصف:\n${copy.description}\n\nدابا كنوجد 4 صور إعلانية... ⏳`,
-  );
-
+  await send(chatId, `العنوان المقترح:\n${copy.title}\n\nالوصف:\n${copy.description}\n\nدابا كنوجد 4 صور إعلانية... ⏳`);
   for (let i = 0; i < imageVariants.length; i += 1) {
     const image = await createAdImage(photo, imageVariants[i]);
     await sendPhoto(chatId, image, `Ad ${i + 1}/4`);
   }
-
-  await send(chatId, "كملنا 4 الصور ✅\nالمرحلة الجاية هي APPROVE ثم النشر فـ Shopify والمنصات.");
+  await send(chatId, "كملنا 4 الصور ✅\nالمرحلة الجاية هي APPROVE ثم النشر.");
 }
 
 function draftFor(chatId) {
@@ -183,16 +153,17 @@ async function handleMessage(message) {
   if (!chatId) return;
 
   if (message.text === "/start" || message.text === "/help") {
-    await send(chatId, "مرحبا 👋\n\n/newproduct - بدا منتج جديد\n/testopenai - اختبار OpenAI\n/cancel - إلغاء العملية الحالية");
+    await send(chatId, "مرحبا 👋\n\n/newproduct - بدا منتج جديد\n/testopenai - اختبار AI\n/cancel - إلغاء العملية الحالية");
     return;
   }
 
   if (message.text === "/testopenai") {
-    const response = await openaiJson("responses", {
-      model: process.env.OPENAI_TEXT_MODEL || "gpt-4.1-mini",
-      input: "Reply with exactly: OPENAI_OK",
-    });
-    await send(chatId, `OpenAI خدام ✅\n${extractResponseText(response)}`);
+    if (!aiEnabled) {
+      await send(chatId, "AI مخليّاه معطل مؤقتاً ✅\nمنين نكونو واجدين نبدلو AI_ENABLED إلى true.");
+      return;
+    }
+    const response = await aiJson("responses", { model: aiTextModel, input: "Reply with exactly: AI_OK" });
+    await send(chatId, `AI خدام ✅\n${extractResponseText(response)}`);
     return;
   }
 
@@ -209,7 +180,6 @@ async function handleMessage(message) {
   }
 
   const draft = draftFor(chatId);
-
   if (message.photo && draft.stage === "photo") {
     const bestPhoto = message.photo.at(-1);
     draft.fileId = bestPhoto.file_id;
@@ -220,6 +190,11 @@ async function handleMessage(message) {
 
   if (message.text && draft.stage === "price") {
     draft.price = message.text.trim();
+    if (!aiEnabled) {
+      drafts.delete(chatId);
+      await send(chatId, `تم تسجيل المنتج ✅\n\nالثمن: ${draft.price}\n\nChatGPT مخليّاه معطل حالياً، وغادي نزيدوه من بعد بلا ما نعاودو نبدلو إعدادات Telegram.`);
+      return;
+    }
     draft.stage = "processing";
     await send(chatId, "تم تسجيل الثمن ✅ كنبدأ المعالجة دابا... ⏳");
     try {
@@ -228,7 +203,7 @@ async function handleMessage(message) {
     } catch (error) {
       console.error(error);
       draft.stage = "error";
-      await send(chatId, `وقع مشكل فـ OpenAI: ${error.message}`);
+      await send(chatId, `وقع مشكل فـ AI: ${error.message}`);
     }
     return;
   }
@@ -239,21 +214,14 @@ async function handleMessage(message) {
 async function poll() {
   while (true) {
     try {
-      const updates = await telegram("getUpdates", {
-        offset,
-        timeout: 25,
-        allowed_updates: ["message"],
-      });
-
+      const updates = await telegram("getUpdates", { offset, timeout: 25, allowed_updates: ["message"] });
       for (const update of updates) {
         offset = update.update_id + 1;
         try {
           await handleMessage(update.message);
         } catch (error) {
           console.error(error);
-          if (update.message?.chat?.id) {
-            await send(update.message.chat.id, `وقع مشكل: ${error.message}`);
-          }
+          if (update.message?.chat?.id) await send(update.message.chat.id, `وقع مشكل: ${error.message}`);
         }
       }
     } catch (error) {
@@ -263,5 +231,5 @@ async function poll() {
   }
 }
 
-console.log("SIMO Ads Bot with OpenAI is running...");
+console.log(`SIMO Ads Bot is running. AI enabled: ${aiEnabled}`);
 poll();
