@@ -12,11 +12,13 @@ permissions:
 jobs:
   build-original-vcamera:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - name: Check out build config
         uses: actions/checkout@v4
 
-      # SDK command-line tools on hosted runners require JDK 17.
+      # SDK command-line tools require JDK 17 on current hosted runners.
       - name: Set up Java 17 for Android SDK tools
         uses: actions/setup-java@v4
         with:
@@ -25,9 +27,10 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          sdkmanager --version
-          yes | sdkmanager --licenses
-          sdkmanager "platforms;android-33" "build-tools;31.0.0" "platform-tools"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$SDKMANAGER" --version
+          yes | "$SDKMANAGER" --licenses
+          "$SDKMANAGER" "platforms;android-33" "build-tools;31.0.0" "platform-tools"
 
       # VCamera uses Android Gradle Plugin 7.0.2, which we run under JDK 11.
       - name: Switch to Java 11 for legacy Gradle
