@@ -18,7 +18,6 @@ jobs:
       - name: Check out build config
         uses: actions/checkout@v4
 
-      # SDK command-line tools require JDK 17 on current hosted runners.
       - name: Set up Java 17 for Android SDK tools
         uses: actions/setup-java@v4
         with:
@@ -32,7 +31,6 @@ jobs:
           yes | "$SDKMANAGER" --licenses
           "$SDKMANAGER" "platforms;android-33" "build-tools;31.0.0" "platform-tools"
 
-      # VCamera uses Android Gradle Plugin 7.0.2, which we run under JDK 11.
       - name: Switch to Java 11 for legacy Gradle
         uses: actions/setup-java@v4
         with:
@@ -44,8 +42,13 @@ jobs:
         with:
           gradle-version: "7.0.2"
 
-      - name: Clone upstream VCamera including opensdk submodule
-        run: git clone --recurse-submodules --depth 1 https://github.com/andvipgroup/VCamera.git VCamera
+      - name: Clone upstream VCamera
+        run: git clone --depth 1 https://github.com/andvipgroup/VCamera.git VCamera
+
+      # The upstream settings.gradle includes :opensdk, but the current VCamera
+      # tree does not materialize the submodule in all clones.
+      - name: Fetch the required opensdk module
+        run: git clone --depth 1 https://github.com/WaxMoon/opensdk.git VCamera/opensdk
 
       - name: Build debug APK
         run: gradle -p VCamera assembleDebug --stacktrace
