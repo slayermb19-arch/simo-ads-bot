@@ -17,9 +17,10 @@ import android.widget.Toast
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private lateinit var root: LinearLayout
     private lateinit var previewFrame: LinearLayout
     private lateinit var imagePreview: ImageView
