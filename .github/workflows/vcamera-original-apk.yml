@@ -16,11 +16,12 @@ jobs:
       - name: Check out build config
         uses: actions/checkout@v4
 
-      - name: Set up Java 11 for legacy Android Gradle Plugin
+      # New Android SDK command-line tools require JDK 17.
+      - name: Set up Java 17 for Android SDK tools
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "11"
+          java-version: "17"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -29,6 +30,13 @@ jobs:
         run: |
           yes | sdkmanager --licenses
           sdkmanager "platforms;android-33" "build-tools;31.0.0" "platform-tools"
+
+      # This legacy project uses Android Gradle Plugin 7.0.2, which is run with JDK 11.
+      - name: Switch to Java 11 for legacy Gradle
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
 
       - name: Set up Gradle 7.0.2
         uses: gradle/actions/setup-gradle@v4
