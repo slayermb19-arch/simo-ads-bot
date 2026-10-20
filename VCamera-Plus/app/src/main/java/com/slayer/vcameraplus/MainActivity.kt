@@ -2,6 +2,7 @@ package com.slayer.vcameraplus
 
 import android.app.Activity
 import android.net.Uri
+import android.content.Intent
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -131,16 +132,40 @@ class MainActivity : ComponentActivity() {
             else resetPreview()
         }, matchWrap().apply { topMargin = dp(10) })
 
-        root.addView(label("APP WORKSPACE", 12f, Color.rgb(143, 130, 255), true).also {
+        root.addView(label("APP SPACE", 12f, Color.rgb(143, 130, 255), true).also {
             it.setPadding(0, dp(24), 0, dp(10))
         })
-        val info = label(
-            "Parallel Space-style app cloning is not included in this first build. Android does not expose a universal public API to clone any installed app. The next stage can explore supported work profiles and multi-user options.",
+        root.addView(label(
+            "Choose an installed app to launch it from this workspace. Android opens the original app; this does not create an isolated clone.",
             14f, Color.rgb(180, 186, 205), false
-        )
-        info.setPadding(dp(14), dp(14), dp(14), dp(14))
-        info.background = rounded(Color.rgb(24, 28, 46), 16)
-        root.addView(info, matchWrap())
+        ).also { it.setPadding(0, 0, 0, dp(12)) })
+        val appList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Color.rgb(24, 28, 46), 16)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+        }
+        val launcherIntent = Intent(Intent.ACTION_MAIN, null).addCategory(Intent.CATEGORY_LAUNCHER)
+        val installedApps = packageManager.queryIntentActivities(launcherIntent, 0)
+            .filter { it.activityInfo.packageName != packageName }
+            .sortedBy { it.loadLabel(packageManager).toString().lowercase() }
+        if (installedApps.isEmpty()) {
+            appList.addView(label("No launchable apps found.", 14f, Color.LTGRAY, false))
+        } else {
+            installedApps.forEach { resolveInfo ->
+                val appLabel = resolveInfo.loadLabel(packageManager).toString()
+                val launchButton = actionButton("▶  $appLabel") {
+                    val intent = packageManager.getLaunchIntentForPackage(resolveInfo.activityInfo.packageName)
+                    if (intent != null) {
+                        try { startActivity(intent) } catch (_: Exception) { toast("Could not open $appLabel") }
+                    } else toast("Could not open $appLabel")
+                }
+                launchButton.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                launchButton.textSize = 14f
+                launchButton.background = rounded(Color.rgb(37, 43, 66), 12)
+                appList.addView(launchButton, matchWrap().apply { bottomMargin = dp(8) })
+            }
+        }
+        root.addView(appList, matchWrap())
         root.addView(label("Privacy-first • Local media picker • No account required", 12f,
             Color.rgb(133, 141, 164), false).also {
             it.gravity = Gravity.CENTER
