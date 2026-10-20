@@ -45,10 +45,14 @@ jobs:
       - name: Clone upstream VCamera
         run: git clone --depth 1 https://github.com/andvipgroup/VCamera.git VCamera
 
-      # The upstream settings.gradle includes :opensdk, but the current VCamera
-      # tree does not materialize the submodule in all clones.
       - name: Fetch the required opensdk module
         run: git clone --depth 1 https://github.com/WaxMoon/opensdk.git VCamera/opensdk
+
+      - name: Enable AndroidX compatibility for the legacy project
+        run: |
+          touch VCamera/gradle.properties
+          grep -q '^android.useAndroidX=' VCamera/gradle.properties || echo 'android.useAndroidX=true' >> VCamera/gradle.properties
+          grep -q '^android.enableJetifier=' VCamera/gradle.properties || echo 'android.enableJetifier=true' >> VCamera/gradle.properties
 
       - name: Build debug APK
         run: gradle -p VCamera assembleDebug --stacktrace
